@@ -140,17 +140,15 @@ if ctx.video_processor:
 tiempo_restante = 30.0
 
 if st.session_state.cronometro_activo and st.session_state.tiempo_inicio:
-    # Auto-refrescar la app cada 1 segundo exacto mientras el cronómetro esté activo
     st_autorefresh(interval=1000, key="cronometro_refresco")
     
     tiempo_transcurrido = time.time() - st.session_state.tiempo_inicio
     tiempo_restante = max(0.0, 30.0 - tiempo_transcurrido)
     txt_tiempo.markdown(f"### ⏱️ Tiempo Restante: **{tiempo_restante:.1f}s**")
     
-    # Guardar métricas cada cierto intervalo de tiempo
     if ctx.video_processor:
         t_label = f"{30 - int(tiempo_restante)}s"
-        if int(tiempo_restante) % 2 == 0:  # Cada 2 segundos registra datos
+        if int(tiempo_restante) % 2 == 0:
             if not any(r[0] == t_label for r in st.session_state.records):
                 st.session_state.records.append([
                     t_label, 
@@ -237,15 +235,3 @@ if tiempo_restante == 0 and st.session_state.records and not st.session_state.co
     if exito:
         st.success("¡Test completado! El reporte PDF se ha enviado a tu correo automáticamente.")
         st.session_state.correo_enviado = True
-
-# --- BOTÓN DE DESCARGA MANUAL OPCIONAL ---
-if st.session_state.records:
-    st.markdown("---")
-    pdf_buffer_download = generar_pdf(st.session_state.patient_name, st.session_state.records)
-    st.download_button(
-        label="📥 Descargar Reporte en PDF Manualmente",
-        data=pdf_buffer_download,
-        file_name=f"reporte_postural_{st.session_state.patient_name.replace(' ', '_') if st.session_state.patient_name else 'anonimo'}.pdf",
-        mime="application/pdf",
-        use_container_width=True
-    )
