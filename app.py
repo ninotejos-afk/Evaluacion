@@ -14,6 +14,7 @@ import av
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase
 import requests
 import base64
+from streamlit_autorefresh import st_autorefresh
 
 st.set_page_config(page_title="Evaluación de Estabilidad Postural", layout="wide")
 st.title("Analizador de Control Postural y Prevención de Caídas")
@@ -49,7 +50,6 @@ class PostureProcessor(VideoProcessorBase):
         self.ang_caderas = 0.0
         self.sway_x = 0.0
         self.estado = "EN ESPERA"
-        self.color_com = (0, 255, 0)
 
     def recv(self, frame):
         img = frame.to_ndarray(format="bgr24")
@@ -78,13 +78,13 @@ class PostureProcessor(VideoProcessorBase):
             mp_drawing.draw_landmarks(img, results.pose_landmarks, mp_pose.POSE_CONNECTIONS)
 
             if self.ang_hombros < 3.0 and self.ang_caderas < 3.0 and self.sway_x < 4.0:
-                self.estado, self.color_com = "SEGURO", (0, 255, 0)
+                self.estado, color_com = "SEGURO", (0, 255, 0)
             elif self.ang_hombros >= 5.0 or self.ang_caderas >= 5.0 or self.sway_x > 6.0:
-                self.estado, self.color_com = "RIESGO DE CAÍDA", (255, 0, 0)
+                self.estado, color_com = "RIESGO DE CAÍDA", (255, 0, 0)
             else:
-                self.estado, self.color_com = "INESTABILIDAD LEVE", (255, 255, 0)
+                self.estado, color_com = "INESTABILIDAD LEVE", (255, 255, 0)
 
-            cv2.circle(img, (com_x, com_y), 12, self.color_com, -1)
+            cv2.circle(img, (com_x, com_y), 12, color_com, -1)
 
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
@@ -136,29 +136,37 @@ if ctx.video_processor:
     else:
         status_text.warning("ADVERTENCIA: Oscilación detectada.")
 
-# --- CRONÓMETRO Y LÓGICA DE CIERRE ---
+# --- CONTROL DEL TEMPORIZADOR Y AUTO-REFRESCO ---
 tiempo_restante = 30.0
+
 if st.session_state.cronometro_activo and st.session_state.tiempo_inicio:
+    # Auto-refrescar la app cada 1 segundo exacto mientras el cronómetro esté activo
+    st_autorefresh(interval=1000, key="cronometro_refresco")
+    
     tiempo_transcurrido = time.time() - st.session_state.tiempo_inicio
     tiempo_restante = max(0.0, 30.0 - tiempo_transcurrido)
-    txt_tiempo.markdown(f"### Tiempo Restante: **{tiempo_restante:.1f}s**")
+    txt_tiempo.markdown(f"### ⏱️ Tiempo Restante: **{tiempo_restante:.1f}s**")
     
-    if ctx.video_processor and int(tiempo_restante * 2) % 10 == 0:
+    # Guardar métricas cada cierto intervalo de tiempo
+    if ctx.video_processor:
         t_label = f"{30 - int(tiempo_restante)}s"
-        if not any(r[0] == t_label for r in st.session_state.records):
-            st.session_state.records.append([
-                t_label, 
-                datetime.now().strftime("%H:%M:%S"), 
-                round(ctx.video_processor.ang_hombros, 1), 
-                round(ctx.video_processor.ang_caderas, 1), 
-                round(ctx.video_processor.sway_x, 1), 
-                ctx.video_processor.estado
-            ])
-            
+        if int(tiempo_restante) % 2 == 0:  # Cada 2 segundos registra datos
+            if not any(r[0] == t_label for r in st.session_state.records):
+                st.session_state.records.append([
+                    t_label, 
+                    datetime.now().strftime("%H:%M:%S"), 
+                    round(ctx.video_processor.ang_hombros, 1), 
+                    round(ctx.video_processor.ang_caderas, 1), 
+                    round(ctx.video_processor.sway_x, 1), 
+                    ctx.video_processor.estado
+                ])
+                
     if tiempo_restante == 0:
         st.session_state.cronometro_activo = False
+else:
+    txt_tiempo.markdown("### ⏱️ Test en espera. Presione Iniciar.")
 
-# --- FUNCIÓN GENERAR PDF ---
+# --- FUNCIONES DE PDF Y CORREO ---
 def generar_pdf(nombre_paciente, registros):
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=letter)
@@ -191,7 +199,6 @@ def generar_pdf(nombre_paciente, registros):
     buffer.seek(0)
     return buffer
 
-# --- FUNCIÓN ENVIAR CORREO CON RESEND ---
 def enviar_correo_resend(pdf_buffer, nombre_paciente):
     try:
         api_key = st.secrets["RESEND_API_KEY"]
@@ -219,24 +226,19 @@ def enviar_correo_resend(pdf_buffer, nombre_paciente):
         }
         
         response = requests.post("https://api.resend.com/emails", json=data, headers=headers)
-        if response.status_code == 200:
-            return True
-        else:
-            st.error(f"Error en API Resend: {response.text}")
-            return False
+        return response.status_code == 200
     except Exception as e:
-        st.error(f"Error al enviar correo: {e}")
         return False
 
-# --- ENVÍO AUTOMÁTICO AL ACABAR EL TIEMPO ---
+# --- ENVÍO AUTOMÁTICO EXACTO AL TERMINAR ---
 if tiempo_restante == 0 and st.session_state.records and not st.session_state.correo_enviado:
     pdf_buffer = generar_pdf(st.session_state.patient_name, st.session_state.records)
     exito = enviar_correo_resend(pdf_buffer, st.session_state.patient_name)
     if exito:
-        st.success("¡Test finalizado! El reporte PDF ha sido enviado a tu correo exitosamente.")
+        st.success("¡Test completado! El reporte PDF se ha enviado a tu correo automáticamente.")
         st.session_state.correo_enviado = True
 
-# --- BOTÓN DE DESCARGA MANUAL POR SI ACASO ---
+# --- BOTÓN DE DESCARGA MANUAL OPCIONAL ---
 if st.session_state.records:
     st.markdown("---")
     pdf_buffer_download = generar_pdf(st.session_state.patient_name, st.session_state.records)
