@@ -7,16 +7,19 @@ import time
 from datetime import datetime
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib import colors
 import io
 import av
-from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration
+from streamlit_webrtc import webrtc_streamer, VideoProcessorBase
+import requests
+import base64
 
 st.set_page_config(page_title="Evaluación de Estabilidad Postural", layout="wide")
 st.title("Analizador de Control Postural y Prevención de Caídas")
 st.error("NOTA DE SEGURIDAD: Realice esta prueba cerca de un apoyo firme.")
 
+# --- INICIALIZAR ESTADOS ---
 if "records" not in st.session_state:
     st.session_state.records = []
 if "patient_name" not in st.session_state:
@@ -25,6 +28,8 @@ if "cronometro_activo" not in st.session_state:
     st.session_state.cronometro_activo = False
 if "tiempo_inicio" not in st.session_state:
     st.session_state.tiempo_inicio = None
+if "correo_enviado" not in st.session_state:
+    st.session_state.correo_enviado = False
 
 st.session_state.patient_name = st.text_input("Nombre del Paciente:", st.session_state.patient_name, placeholder="Ej. Juan Pérez")
 
@@ -83,6 +88,7 @@ class PostureProcessor(VideoProcessorBase):
 
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
+# --- INTERFAZ ---
 col_cam, col_data = st.columns(2)
 
 with col_cam:
@@ -102,11 +108,13 @@ with col_data:
             st.session_state.cronometro_activo = True
             st.session_state.tiempo_inicio = time.time()
             st.session_state.records = []
+            st.session_state.correo_enviado = False
     with col_btn2:
         if st.button("Reiniciar", use_container_width=True):
             st.session_state.cronometro_activo = False
             st.session_state.tiempo_inicio = None
             st.session_state.records = []
+            st.session_state.correo_enviado = False
             
     txt_tiempo = st.empty()
     st.markdown("---")
@@ -128,6 +136,7 @@ if ctx.video_processor:
     else:
         status_text.warning("ADVERTENCIA: Oscilación detectada.")
 
+# --- CRONÓMETRO Y LÓGICA DE CIERRE ---
 tiempo_restante = 30.0
 if st.session_state.cronometro_activo and st.session_state.tiempo_inicio:
     tiempo_transcurrido = time.time() - st.session_state.tiempo_inicio
@@ -148,5 +157,93 @@ if st.session_state.cronometro_activo and st.session_state.tiempo_inicio:
             
     if tiempo_restante == 0:
         st.session_state.cronometro_activo = False
-else:
-      txt_tiempo.markdown("### Test en espera. Presione Iniciar.")
+
+# --- FUNCIÓN GENERAR PDF ---
+def generar_pdf(nombre_paciente, registros):
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=letter)
+    styles = getSampleStyleSheet()
+    story = []
+
+    story.append(Paragraph(f"<b>Reporte de Estabilidad Postural</b>", styles['Title']))
+    story.append(Spacer(1, 12))
+    story.append(Paragraph(f"<b>Paciente:</b> {nombre_paciente if nombre_paciente else 'Anónimo'}", styles['Normal']))
+    story.append(Paragraph(f"<b>Fecha:</b> {datetime.now().strftime('%d/%m/%Y %H:%M')}", styles['Normal']))
+    story.append(Spacer(1, 15))
+
+    data = [["Tiempo", "Hora", "Hombros (°)", "Caderas (°)", "Oscilación (px)", "Estado"]]
+    for r in registros:
+        data.append(r)
+
+    t = Table(data, colWidths=[60, 65, 80, 80, 95, 100])
+    t.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,0), colors.grey),
+        ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
+        ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+        ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+        ('BOTTOMPADDING', (0,0), (-1,0), 6),
+        ('BACKGROUND', (0,1), (-1,-1), colors.beige),
+        ('GRID', (0,0), (-1,-1), 0.5, colors.black)
+    ]))
+    
+    story.append(t)
+    doc.build(story)
+    buffer.seek(0)
+    return buffer
+
+# --- FUNCIÓN ENVIAR CORREO CON RESEND ---
+def enviar_correo_resend(pdf_buffer, nombre_paciente):
+    try:
+        api_key = st.secrets["RESEND_API_KEY"]
+        destinatario = st.secrets["TU_CORREO"]
+        
+        pdf_bytes = pdf_buffer.getvalue()
+        pdf_base64 = base64.b64encode(pdf_bytes).decode('utf-8')
+        
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        data = {
+            "from": "Evaluación Postural <onboarding@resend.dev>",
+            "to": [destinatario],
+            "subject": f"Nuevo Reporte Postural: {nombre_paciente if nombre_paciente else 'Anónimo'}",
+            "html": f"<p>Hola,</p><p>Se adjunta el reporte de estabilidad postural correspondiente al paciente: <b>{nombre_paciente if nombre_paciente else 'Anónimo'}</b>.</p>",
+            "attachments": [
+                {
+                    "filename": f"reporte_{nombre_paciente.replace(' ', '_') if nombre_paciente else 'anonimo'}.pdf",
+                    "content": pdf_base64
+                }
+            ]
+        }
+        
+        response = requests.post("https://api.resend.com/emails", json=data, headers=headers)
+        if response.status_code == 200:
+            return True
+        else:
+            st.error(f"Error en API Resend: {response.text}")
+            return False
+    except Exception as e:
+        st.error(f"Error al enviar correo: {e}")
+        return False
+
+# --- ENVÍO AUTOMÁTICO AL ACABAR EL TIEMPO ---
+if tiempo_restante == 0 and st.session_state.records and not st.session_state.correo_enviado:
+    pdf_buffer = generar_pdf(st.session_state.patient_name, st.session_state.records)
+    exito = enviar_correo_resend(pdf_buffer, st.session_state.patient_name)
+    if exito:
+        st.success("¡Test finalizado! El reporte PDF ha sido enviado a tu correo exitosamente.")
+        st.session_state.correo_enviado = True
+
+# --- BOTÓN DE DESCARGA MANUAL POR SI ACASO ---
+if st.session_state.records:
+    st.markdown("---")
+    pdf_buffer_download = generar_pdf(st.session_state.patient_name, st.session_state.records)
+    st.download_button(
+        label="📥 Descargar Reporte en PDF Manualmente",
+        data=pdf_buffer_download,
+        file_name=f"reporte_postural_{st.session_state.patient_name.replace(' ', '_') if st.session_state.patient_name else 'anonimo'}.pdf",
+        mime="application/pdf",
+        use_container_width=True
+    )
