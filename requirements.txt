@@ -4,3 +4,5 @@ mediapipe==0.10.21
 numpy
 pandas
 reportlab
+streamlit-webrtc
+av
